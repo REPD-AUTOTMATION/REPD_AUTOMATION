@@ -1,19 +1,29 @@
 require('dotenv').config();
 const noblox = require('noblox.js');
+const http = require('http');
 
 const GROUP_ID = parseInt(process.env.GROUP_ID, 10);
-const BASE_RANK_ID = 1;          // Member
-const TARGET_RANK_ID = 2;        // Police Recruit
+const BASE_RANK_ID = 1;
+const TARGET_RANK_ID = 2;
 const CHECK_INTERVAL_MS = 1500;
-const RANK_COOLDOWN_MS = 15000;  // 45 seconds cooldown after ranking
+const RANK_COOLDOWN_MS = 15000;
 const MAX_RETRIES = 4;
 
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 const processingSet = new Set();
-const recentlyRanked = new Map(); // userId → timestamp
+const recentlyRanked = new Map();
 let baseRoleSetId = null;
 let isPolling = false;
+
+// Dummy server so Render is happy (free Web Service)
+const PORT = process.env.PORT || 3000;
+http.createServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'text/plain' });
+    res.end('Roblox Auto-Ranker is running');
+}).listen(PORT, () => {
+    console.log(`[SYSTEM] Dummy server running on port ${PORT}`);
+});
 
 function getUserId(player) {
     if (!player) return null;
@@ -32,7 +42,7 @@ async function withRetry(fn, label = 'API call') {
                           msg.includes('Internal Server Error');
 
             if (is500 && attempt < MAX_RETRIES) {
-                const delay = 1500 * attempt;
+                const delay = 1200 * attempt;
                 console.warn(`[RETRY ${attempt}/${MAX_RETRIES}] ${label} → 500. Waiting ${delay}ms...`);
                 await sleep(delay);
                 continue;
@@ -66,7 +76,6 @@ async function getRank1Members() {
 async function rankMember(userId, username) {
     if (processingSet.has(userId)) return;
 
-    // Skip if we ranked this user recently
     const lastRanked = recentlyRanked.get(userId);
     if (lastRanked && Date.now() - lastRanked < RANK_COOLDOWN_MS) {
         return;
@@ -90,14 +99,12 @@ async function rankMember(userId, username) {
             );
 
             console.log(`[SUCCESS] Ranked ${username} (${userId}) → ${result.name}`);
-            recentlyRanked.set(userId, Date.now()); // start cooldown
+            recentlyRanked.set(userId, Date.now());
         } else {
-            // Not Rank 1 – put a short cooldown so we don't keep checking them every 3s
             recentlyRanked.set(userId, Date.now());
         }
     } catch (err) {
         console.error(`[FAILED] ${username} (${userId}): ${err.message || err}`);
-        // No cooldown on failure → will retry
     } finally {
         processingSet.delete(userId);
     }
@@ -111,7 +118,7 @@ async function startAutoRanker() {
 
         console.log('==================================================');
         console.log(`Bot Active: ${botUsername} (ID: ${botUserId})`);
-        console.log(`Mode: Rank 1 → ${TARGET_RANK_ID} (supports rejoin)`);
+        console.log(`Mode: Rank 1 → ${TARGET_RANK_ID}`);
         console.log(`Poll interval: ${CHECK_INTERVAL_MS}ms | Cooldown: ${RANK_COOLDOWN_MS / 1000}s`);
         console.log('==================================================\n');
 
@@ -125,7 +132,6 @@ async function startAutoRanker() {
                 const rank1Members = await getRank1Members();
                 if (!rank1Members) return;
 
-                // Clean old cooldown entries (memory hygiene)
                 const now = Date.now();
                 for (const [id, ts] of recentlyRanked) {
                     if (now - ts > RANK_COOLDOWN_MS * 3) {
