@@ -52,30 +52,64 @@ async function withRetry(fn, label = 'API call') {
     }
 }
 
-// ---------- Discord Helpers ----------
+// ---------- Discord Helpers (Rate-limit safe) ----------
+const discordQueue = [];
+let isProcessingDiscord = false;
+
+async function processDiscordQueue() {
+    if (isProcessingDiscord || discordQueue.length === 0) return;
+    isProcessingDiscord = true;
+
+    while (discordQueue.length > 0) {
+        const { content, embeds, resolve } = discordQueue.shift();
+
+        try {
+            const res = await fetch(DISCORD_WEBHOOK_URL, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    content: content || undefined,
+                    embeds: embeds?.length ? embeds : undefined,
+                    username: 'Group Logger',
+                }),
+            });
+
+            if (res.status === 429) {
+                const retryAfter = Number(res.headers.get('Retry-After') || 5);
+                console.warn(`[DISCORD] Rate limited. Waiting ${retryAfter}s...`);
+                discordQueue.unshift({ content, embeds, resolve });
+                await sleep(retryAfter * 1000);
+                continue;
+            }
+
+            if (!res.ok) {
+                const text = await res.text();
+                throw new Error(`Discord ${res.status}: ${text}`);
+            }
+
+            resolve(true);
+        } catch (err) {
+            console.error('[DISCORD] Failed to send:', err.message || err);
+            resolve(false);
+        }
+
+        // Small delay between messages to stay under limits
+        await sleep(800);
+    }
+
+    isProcessingDiscord = false;
+}
+
 async function sendDiscord(content, embeds = []) {
     if (!DISCORD_WEBHOOK_URL) {
         console.warn('[DISCORD] No DISCORD_WEBHOOK_URL set');
         return;
     }
-    try {
-        const res = await fetch(DISCORD_WEBHOOK_URL, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                content: content || undefined,
-                embeds: embeds.length ? embeds : undefined,
-                username: 'Group Logger',
-            }),
-        });
 
-        if (!res.ok) {
-            const text = await res.text();
-            throw new Error(`Discord ${res.status}: ${text}`);
-        }
-    } catch (err) {
-        console.error('[DISCORD] Failed to send:', err.message || err);
-    }
+    return new Promise((resolve) => {
+        discordQueue.push({ content, embeds, resolve });
+        processDiscordQueue();
+    });
 }
 
 function makeEmbed(title, description, color = 0x5865F2) {
@@ -148,7 +182,7 @@ async function rankMember(userId, username) {
     }
 }
 
-// ---------- Audit Log (Promotions, Demotions, Exile, New Members, Leaves) ----------
+// ---------- Audit Log ----------
 async function startAuditLogger() {
     try {
         const audit = noblox.onAuditLog(GROUP_ID);
@@ -166,7 +200,7 @@ async function startAuditLogger() {
                 if (entry.actionType === 'ChangeRank') {
                     const oldRank = desc.OldRoleSetName || 'Unknown';
                     const newRank = desc.NewRoleSetName || 'Unknown';
-                    const msg = `**${targetName}** (\`${targetId}\`)\nFrom **${oldRank}** → **${newRank}**\nBy: ${actor}`;
+                    const msg = `**${targetName}** (\`${targetId}\`)\nFrom **${oldRank}** → **${newRank**\nBy: ${actor}`;
                     console.log(`[RANK CHANGE] ${targetName}: ${oldRank} → ${newRank}`);
                     await sendDiscord(null, [
                         makeEmbed('⬆️ Rank Changed (Promotion / Demotion)', msg, 0xFEE75C),
@@ -182,7 +216,7 @@ async function startAuditLogger() {
                     ]);
                 }
 
-                // New member (join request accepted)
+                // New member
                 if (entry.actionType === 'AcceptJoinRequest') {
                     const msg = `**${targetName}** (\`${targetId}\`)\nAccepted by: **${actor}**`;
                     console.log(`[NEW MEMBER] ${targetName} joined the group`);
@@ -216,8 +250,7 @@ async function sendGroupStatus() {
         const description =
             `**Group:** ${groupName}\n` +
             `**Members:** ${memberCount.toLocaleString()}\n` +
-            `**Current Shout:** ${shout}\n\n` +
-            `Bot is online and ranking Rank ${BASE_RANK_ID} → Rank ${TARGET_RANK_ID}`;
+            `**Current Shout:** ${shout}\n\n`;
         await sendDiscord(null, [
             makeEmbed('📊 Group Status Update', description, 0x5865F2),
         ]);
@@ -242,8 +275,8 @@ async function startAutoRanker() {
 
         await startAuditLogger();
 
-        // First status after 10 seconds, then every 2 hours
-        setTimeout(() => sendGroupStatus(), 10000);
+        // First status after 30 seconds, then every 2 hours
+        setTimeout(() => sendGroupStatus(), 30000);
         setInterval(sendGroupStatus, STATUS_INTERVAL_MS);
 
         console.log('[SYSTEM] Bot is running. Waiting for Rank 1 members...\n');
