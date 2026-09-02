@@ -250,7 +250,8 @@ async function sendGroupStatus() {
         const description =
             `**Group:** ${groupName}\n` +
             `**Members:** ${memberCount.toLocaleString()}\n` +
-            `**Current Shout:** ${shout}\n\n`;
+            `**Current Shout:** ${shout}\n\n` +
+            `Bot is online and ranking Rank ${BASE_RANK_ID} → Rank ${TARGET_RANK_ID}`;
         await sendDiscord(null, [
             makeEmbed('📊 Group Status Update', description, 0x5865F2),
         ]);
