@@ -200,7 +200,7 @@ async function startAuditLogger() {
                 if (entry.actionType === 'ChangeRank') {
                     const oldRank = desc.OldRoleSetName || 'Unknown';
                     const newRank = desc.NewRoleSetName || 'Unknown';
-                    const msg = `**${targetName}** (\`${targetId}\`)\nFrom **${oldRank}** → **${newRank**\nBy: ${actor}`;
+                    const msg = `**${targetName}** (\`${targetId}\`)\nFrom **${oldRank}** → **${newRank}**\nBy: ${actor}`;
                     console.log(`[RANK CHANGE] ${targetName}: ${oldRank} → ${newRank}`);
                     await sendDiscord(null, [
                         makeEmbed('⬆️ Rank Changed (Promotion / Demotion)', msg, 0xFEE75C),
