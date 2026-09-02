@@ -16,8 +16,9 @@ const processingSet = new Set();
 const recentlyRanked = new Map();
 let baseRoleSetId = null;
 let isPolling = false;
+let lastAuditLogId = null;
 
-// Dummy server for Render free Web Service
+// Dummy server for Render
 const PORT = process.env.PORT || 3000;
 http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'text/plain' });
@@ -93,7 +94,6 @@ async function processDiscordQueue() {
             resolve(false);
         }
 
-        // Small delay between messages to stay under limits
         await sleep(800);
     }
 
@@ -182,62 +182,67 @@ async function rankMember(userId, username) {
     }
 }
 
-// ---------- Audit Log ----------
-async function startAuditLogger() {
+// ---------- Audit Log (Polling) ----------
+async function checkAuditLog() {
     try {
-        const audit = noblox.onAuditLog(GROUP_ID);
+        // Correct parameter order: group, actionType, userId, sortOrder, limit
+        const logs = await withRetry(
+            () => noblox.getAuditLog(GROUP_ID, null, null, "Desc", 25),
+            'getAuditLog'
+        );
 
-        audit.on('data', async (entry) => {
-            try {
-                if (!entry || !entry.actionType) return;
+        if (!logs || !logs.data || logs.data.length === 0) return;
 
-                const desc = entry.description || {};
-                const targetName = desc.TargetName || 'Unknown';
-                const targetId = desc.TargetId || '?';
-                const actor = entry.actor?.user?.username || entry.actor?.username || 'Unknown';
+        const entries = logs.data.sort((a, b) => a.id - b.id);
 
-                // Promotion / Demotion
-                if (entry.actionType === 'ChangeRank') {
-                    const oldRank = desc.OldRoleSetName || 'Unknown';
-                    const newRank = desc.NewRoleSetName || 'Unknown';
-                    const msg = `**${targetName}** (\`${targetId}\`)\nFrom **${oldRank}** → **${newRank}**\nBy: ${actor}`;
-                    console.log(`[RANK CHANGE] ${targetName}: ${oldRank} → ${newRank}`);
-                    await sendDiscord(null, [
-                        makeEmbed('⬆️ Rank Changed (Promotion / Demotion)', msg, 0xFEE75C),
-                    ]);
-                }
+        for (const entry of entries) {
+            if (lastAuditLogId && entry.id <= lastAuditLogId) continue;
+            lastAuditLogId = entry.id;
 
-                // Exile / Kick / Removal / Left
-                if (entry.actionType === 'RemoveMember') {
-                    const msg = `**${targetName}** (\`${targetId}\`)\nRemoved / Exiled by: **${actor}**`;
-                    console.log(`[LEAVE / EXILE] ${targetName} was removed by ${actor}`);
-                    await sendDiscord(null, [
-                        makeEmbed('🚪 Member Left / Exiled / Removed', msg, 0xED4245),
-                    ]);
-                }
+            const actionType = entry.actionType;
+            const desc = entry.description || {};
+            const targetName = desc.TargetName || desc.Target?.name || 'Unknown';
+            const targetId = desc.TargetId || desc.Target?.id || '?';
+            const actor = entry.actor?.user?.username || entry.actor?.username || 'Unknown';
 
-                // New member
-                if (entry.actionType === 'AcceptJoinRequest') {
-                    const msg = `**${targetName}** (\`${targetId}\`)\nAccepted by: **${actor}**`;
-                    console.log(`[NEW MEMBER] ${targetName} joined the group`);
-                    await sendDiscord(null, [
-                        makeEmbed('✅ New Member Joined', msg, 0x57F287),
-                    ]);
-                }
-
-            } catch (err) {
-                console.error('[AUDIT] Error handling entry:', err.message || err);
+            // Promotion / Demotion
+            if (actionType === 'ChangeRank') {
+                const oldRank = desc.OldRoleSetName || 'Unknown';
+                const newRank = desc.NewRoleSetName || 'Unknown';
+                const msg = `**${targetName}** (\`${targetId}\`)\nFrom **${oldRank}** → **${newRank}**\nBy: ${actor}`;
+                console.log(`[RANK CHANGE] ${targetName}: ${oldRank} → ${newRank}`);
+                await sendDiscord(null, [
+                    makeEmbed('⬆️ Rank Changed (Promotion / Demotion)', msg, 0xFEE75C),
+                ]);
             }
-        });
 
-        audit.on('error', (err) => {
-            console.error('[AUDIT] Error:', err.message || err);
-        });
+            // Leave / Exile / Kick / Removal
+            if (actionType === 'RemoveMember') {
+                const msg = `**${targetName}** (\`${targetId}\`)\nRemoved / Exiled by: **${actor}**`;
+                console.log(`[LEAVE / EXILE] ${targetName} was removed by ${actor}`);
+                await sendDiscord(null, [
+                    makeEmbed('🚪 Member Left / Exiled / Removed', msg, 0xED4245),
+                ]);
+            }
 
-        console.log('[SYSTEM] Audit log listener started');
+            // New member
+            if (actionType === 'AcceptJoinRequest') {
+                const msg = `**${targetName}** (\`${targetId}\`)\nAccepted by: **${actor}**`;
+                console.log(`[NEW MEMBER] ${targetName} joined the group`);
+                await sendDiscord(null, [
+                    makeEmbed('✅ New Member Joined', msg, 0x57F287),
+                ]);
+            }
+        }
     } catch (err) {
-        console.error('[AUDIT] Failed to start:', err.message || err);
+        console.error('[AUDIT] Poll error:', err.message || err);
     }
+}
+
+async function startAuditLogger() {
+    console.log('[SYSTEM] Audit log polling started (every 20s)');
+    await checkAuditLog();
+    setInterval(checkAuditLog, 20000);
 }
 
 // ---------- 2-Hour Status Update ----------
@@ -276,7 +281,6 @@ async function startAutoRanker() {
 
         await startAuditLogger();
 
-        // First status after 30 seconds, then every 2 hours
         setTimeout(() => sendGroupStatus(), 30000);
         setInterval(sendGroupStatus, STATUS_INTERVAL_MS);
 
