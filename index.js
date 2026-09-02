@@ -9,11 +9,9 @@ const CHECK_INTERVAL_MS = 1500;
 const RANK_COOLDOWN_MS = 15000;
 const STATUS_INTERVAL_MS = 2 * 60 * 60 * 1000; // 2 hours
 const MAX_RETRIES = 4;
-
 const DISCORD_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL;
 
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
-
 const processingSet = new Set();
 const recentlyRanked = new Map();
 let baseRoleSetId = null;
@@ -43,7 +41,6 @@ async function withRetry(fn, label = 'API call') {
             const is500 = err?.httpStatusCode === 500 ||
                           msg.includes('InternalServerError') ||
                           msg.includes('Internal Server Error');
-
             if (is500 && attempt < MAX_RETRIES) {
                 const delay = 1200 * attempt;
                 console.warn(`[RETRY ${attempt}/${MAX_RETRIES}] ${label} → 500. Waiting ${delay}ms...`);
@@ -61,9 +58,8 @@ async function sendDiscord(content, embeds = []) {
         console.warn('[DISCORD] No DISCORD_WEBHOOK_URL set');
         return;
     }
-
     try {
-        await fetch(DISCORD_WEBHOOK_URL, {
+        const res = await fetch(DISCORD_WEBHOOK_URL, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -72,6 +68,11 @@ async function sendDiscord(content, embeds = []) {
                 username: 'Group Logger',
             }),
         });
+
+        if (!res.ok) {
+            const text = await res.text();
+            throw new Error(`Discord ${res.status}: ${text}`);
+        }
     } catch (err) {
         console.error('[DISCORD] Failed to send:', err.message || err);
     }
@@ -97,7 +98,6 @@ async function getRank1Members() {
             baseRoleSetId = baseRole.id;
             console.log(`[SYSTEM] Cached roleset ID for Rank ${BASE_RANK_ID}: ${baseRoleSetId}`);
         }
-
         const members = await withRetry(
             () => noblox.getPlayers(GROUP_ID, baseRoleSetId),
             'getPlayers'
@@ -111,32 +111,25 @@ async function getRank1Members() {
 
 async function rankMember(userId, username) {
     if (processingSet.has(userId)) return;
-
     const lastRanked = recentlyRanked.get(userId);
     if (lastRanked && Date.now() - lastRanked < RANK_COOLDOWN_MS) {
         return;
     }
-
     processingSet.add(userId);
-
     try {
         const currentRank = await withRetry(
             () => noblox.getRankInGroup(GROUP_ID, userId),
             `getRankInGroup ${userId}`
         );
-
         if (currentRank === BASE_RANK_ID) {
             console.log(`\n[NEW MEMBER] ${username} (${userId}) is Rank 1`);
             console.log(`[RANKING] ${username} → Rank ${TARGET_RANK_ID}...`);
-
             const result = await withRetry(
                 () => noblox.setRank(GROUP_ID, userId, TARGET_RANK_ID),
                 `setRank ${userId}`
             );
-
             console.log(`[SUCCESS] Ranked ${username} (${userId}) → ${result.name}`);
             recentlyRanked.set(userId, Date.now());
-
             await sendDiscord(null, [
                 makeEmbed(
                     '🆕 New Member Ranked',
@@ -148,13 +141,14 @@ async function rankMember(userId, username) {
             recentlyRanked.set(userId, Date.now());
         }
     } catch (err) {
-        console.error(`[FAILED] ${username} (${userId}): ${err.message || err}`);
+        const details = err?.errors || err?.response?.data || err?.message || err;
+        console.error(`[FAILED] ${username} (${userId}):`, details);
     } finally {
         processingSet.delete(userId);
     }
 }
 
-// ---------- Audit Log (Promotions + Leaves) ----------
+// ---------- Audit Log (Promotions, Demotions, Exile, New Members, Leaves) ----------
 async function startAuditLogger() {
     try {
         const audit = noblox.onAuditLog(GROUP_ID);
@@ -168,35 +162,32 @@ async function startAuditLogger() {
                 const targetId = desc.TargetId || '?';
                 const actor = entry.actor?.user?.username || entry.actor?.username || 'Unknown';
 
-                // Rank change
+                // Promotion / Demotion
                 if (entry.actionType === 'ChangeRank') {
                     const oldRank = desc.OldRoleSetName || 'Unknown';
                     const newRank = desc.NewRoleSetName || 'Unknown';
-
                     const msg = `**${targetName}** (\`${targetId}\`)\nFrom **${oldRank}** → **${newRank}**\nBy: ${actor}`;
-
-                    console.log(`[PROMOTE] ${targetName}: ${oldRank} → ${newRank}`);
-
+                    console.log(`[RANK CHANGE] ${targetName}: ${oldRank} → ${newRank}`);
                     await sendDiscord(null, [
-                        makeEmbed('⬆️ Rank Changed', msg, 0xFEE75C),
+                        makeEmbed('⬆️ Rank Changed (Promotion / Demotion)', msg, 0xFEE75C),
                     ]);
                 }
 
-                // Member left / removed
+                // Exile / Kick / Removal / Left
                 if (entry.actionType === 'RemoveMember') {
-                    const msg = `**${targetName}** (\`${targetId}\`)\nRemoved by: **${actor}**`;
-
-                    console.log(`[LEAVE] ${targetName} was removed by ${actor}`);
-
+                    const msg = `**${targetName}** (\`${targetId}\`)\nRemoved / Exiled by: **${actor}**`;
+                    console.log(`[LEAVE / EXILE] ${targetName} was removed by ${actor}`);
                     await sendDiscord(null, [
-                        makeEmbed('🚪 Member Left / Removed', msg, 0xED4245),
+                        makeEmbed('🚪 Member Left / Exiled / Removed', msg, 0xED4245),
                     ]);
                 }
 
-                // Join request accepted
+                // New member (join request accepted)
                 if (entry.actionType === 'AcceptJoinRequest') {
+                    const msg = `**${targetName}** (\`${targetId}\`)\nAccepted by: **${actor}**`;
+                    console.log(`[NEW MEMBER] ${targetName} joined the group`);
                     await sendDiscord(null, [
-                        makeEmbed('✅ Join Request Accepted', `**${targetName}** (\`${targetId}\`)`, 0x57F287),
+                        makeEmbed('✅ New Member Joined', msg, 0x57F287),
                     ]);
                 }
 
@@ -222,17 +213,14 @@ async function sendGroupStatus() {
         const memberCount = group.memberCount || 'Unknown';
         const groupName = group.name || 'Group';
         const shout = group.shout?.body ? group.shout.body.slice(0, 200) : 'No shout';
-
-        const description = 
+        const description =
             `**Group:** ${groupName}\n` +
             `**Members:** ${memberCount.toLocaleString()}\n` +
             `**Current Shout:** ${shout}\n\n` +
             `Bot is online and ranking Rank ${BASE_RANK_ID} → Rank ${TARGET_RANK_ID}`;
-
         await sendDiscord(null, [
             makeEmbed('📊 Group Status Update', description, 0x5865F2),
         ]);
-
         console.log('[STATUS] 2-hour group update sent');
     } catch (err) {
         console.error('[STATUS] Failed to send update:', err.message || err);
@@ -254,6 +242,7 @@ async function startAutoRanker() {
 
         await startAuditLogger();
 
+        // First status after 10 seconds, then every 2 hours
         setTimeout(() => sendGroupStatus(), 10000);
         setInterval(sendGroupStatus, STATUS_INTERVAL_MS);
 
@@ -262,7 +251,6 @@ async function startAutoRanker() {
         setInterval(async () => {
             if (isPolling) return;
             isPolling = true;
-
             try {
                 const rank1Members = await getRank1Members();
                 if (!rank1Members) return;
@@ -277,7 +265,6 @@ async function startAutoRanker() {
                 for (const player of rank1Members) {
                     const uid = getUserId(player);
                     if (!uid || uid === botUserId) continue;
-
                     if (!processingSet.has(uid)) {
                         rankMember(uid, player.username || `User ${uid}`);
                     }
@@ -298,7 +285,6 @@ async function startAutoRanker() {
 process.on('unhandledRejection', (reason) => {
     console.error('[UNHANDLED REJECTION]', reason?.message || reason);
 });
-
 process.on('uncaughtException', (err) => {
     console.error('[UNCAUGHT EXCEPTION]', err?.message || err);
 });
